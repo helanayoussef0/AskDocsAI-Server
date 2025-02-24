@@ -1,4 +1,5 @@
 import { generateAIResponse } from './openaiController.js';
+import db from '../config/db.js';
 
 const getInitialMessages = (documentContent) => [{
   role: 'system',
@@ -19,29 +20,54 @@ export const handleChat = async (req, res) => {
       return res.status(400).json({ error: 'Document content is required' });
     }
 
-    console.log('Received request:', {
-      message,
-      documentLength: documentContent.length,
-      contextLength: context?.length || 0
-    });
+    const document = await db('documents')
+      .where('content', documentContent)
+      .first();
 
-    const messageHistory = getInitialMessages(documentContent);
-    if (context) {
-      context.forEach(msg => {
-        messageHistory.push({
-          role: msg.isUser ? 'user' : 'assistant',
-          content: msg.text
-        });
-      });
+    if (!document) {
+      return res.status(404).json({ error: 'Document not found. Please analyze the document first.' });
     }
 
-    messageHistory.push({
-      role: 'user',
-      content: message
-    });
+    const conversation = await db('conversations')
+      .where({
+        document_id: document.id,
+        status: 'active'
+      })
+      .first();
 
-    const response = await generateAIResponse(messageHistory);
-    res.json({ response });
+    if (!conversation) {
+      return res.status(404).json({ error: 'No active conversation found for this document.' });
+    }
+
+    const [messageId] = await db('messages')
+      .insert({
+        conversation_id: conversation.id,
+        content: message,
+        role: 'user'
+      });
+
+    const messageHistory = getInitialMessages(documentContent);
+    
+    const previousMessages = await db('messages')
+      .where('conversation_id', conversation.id)
+      .orderBy('created_at', 'asc')
+      .select('content', 'role');
+
+    messageHistory.push(...previousMessages.map(msg => ({
+      role: msg.role,
+      content: msg.content
+    })));
+
+    const aiResponse = await generateAIResponse(messageHistory);
+
+    await db('messages')
+      .insert({
+        conversation_id: conversation.id,
+        content: aiResponse,
+        role: 'assistant'
+      });
+
+    res.json({ response: aiResponse });
 
   } catch (error) {
     console.error('Error in chat endpoint:', error);
@@ -52,6 +78,17 @@ export const handleChat = async (req, res) => {
   }
 };
 
-export const healthCheck = (req, res) => {
-  res.json({ status: 'ok', message: 'Server is running' });
+export const healthCheck = async (req, res) => {
+  try {
+    await db.raw('SELECT 1');
+    res.json({ 
+      status: 'ok', 
+      message: 'Server is running and database is connected' 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: 'Database connection failed' 
+    });
+  }
 };
